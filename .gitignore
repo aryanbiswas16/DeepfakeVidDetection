@@ -1,0 +1,29 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Local training data (keep data/README.txt tracked)
+data/train/
+data/val/
+
+# Model weights / artifacts (adjust if you want to publish weights)
+*.pt
+*.pth
+*.onnx
+*.ckpt
+*.h5
