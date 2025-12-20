@@ -1,19 +1,22 @@
-from __future__ import annotations
-import torch
 import torch.nn as nn
 
 class ClassifierHead(nn.Module):
-    def __init__(self, in_dim: int, hidden: int = 512, dropout: float = 0.2, num_classes: int = 2):
+    """Maps embeddings to binary real/fake classification."""
+    
+    def __init__(self, in_dim=1024, hidden_dim=512):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, in_dim),
+        
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
             nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(in_dim, hidden),
+            nn.Dropout(0.3),
+            
+            nn.Linear(hidden_dim, hidden_dim // 2),
             nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden, num_classes),
+            nn.Dropout(0.3),
+            
+            nn.Linear(hidden_dim // 2, 2)  # real/fake
         )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+    
+    def forward(self, embeddings):
+        return self.mlp(embeddings)

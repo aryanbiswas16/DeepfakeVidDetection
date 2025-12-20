@@ -12,28 +12,26 @@ class EncoderInfo:
     embed_dim: int
     image_size: int
 
-def _try_build_dinov2() -> tuple[nn.Module, EncoderInfo] | None:
+def _try_build_dinov3() -> tuple[nn.Module, EncoderInfo] | None:
     """
-    Attempts to build a DINOv2 ViT encoder via timm.
-    If timm or the model name isn't available, returns None.
+    Attempts to build a DINOv3 ViT encoder via timm.
+    Returns None if timm or all model names are unavailable.
     """
     try:
         import timm  # type: ignore
     except Exception:
         return None
 
-    # Common timm names vary by install; try a few.
-    # Prefer DINOv3 (newer) if available, then DINOv2.
+    # Try preferred DINOv3 ViT-B/16 first
     candidates = [
-        # DINOv3 (timm)
-        "vit_small_patch16_dinov3",
-        "vit_base_patch16_dinov3",
-        "vit_large_patch16_dinov3",
-        # DINOv2 (timm)
+        "vit_base_patch16_dinov3.lvd1689m",  # preferred: matches facebook/dinov3-vitb16-pretrain-lvd1689m
+        "vit_base_patch16_dinov3",            # alt name
+        "vit_base_patch14_dinov2",            # Fallback
+        "vit_base_patch14_dinov2.lvd142m",
+        "vit_large_patch16_dinov3.lvd1689m",  # optional upgrade if mostly frozen
+        "vit_large_patch16_dinov3",           # alt name
         "vit_large_patch14_dinov2",
         "vit_large_patch14_dinov2.lvd142m",
-        "vit_base_patch14_dinov2",
-        "vit_base_patch14_dinov2.lvd142m",
     ]
 
     for name in candidates:
@@ -44,10 +42,12 @@ def _try_build_dinov2() -> tuple[nn.Module, EncoderInfo] | None:
                 # fallback guess
                 embed_dim = 1024
             info = EncoderInfo(name=f"timm:{name}", embed_dim=int(embed_dim), image_size=224)
+            print(f"✅ Successfully loaded encoder: {name}")
             return model, info
         except Exception:
             continue
-
+            
+    print("❌ Failed to load any DINO model from candidates.")
     return None
 
 def _build_resnet50_fallback() -> tuple[nn.Module, EncoderInfo]:
@@ -60,9 +60,9 @@ def _build_resnet50_fallback() -> tuple[nn.Module, EncoderInfo]:
 
 class FrameEncoder(nn.Module):
     """
-    Frame encoder with a DINOv2-first, ResNet50-fallback policy.
+    Frame encoder with a DINOv3-first (ViT-B/16 default), ResNet50-fallback policy.
 
-    - If DINOv2 is available (via timm), freeze everything, then unfreeze only LayerNorm params.
+    - If DINOv3 is available (via timm), freeze everything, then unfreeze only LayerNorm params.
     - If using ResNet50 fallback, freeze everything by default (train head only).
     """
 
@@ -70,14 +70,14 @@ class FrameEncoder(nn.Module):
         super().__init__()
         self.device = device
 
-        built = _try_build_dinov2()
+        built = _try_build_dinov3()
         if built is None:
-            warnings.warn("DINOv2 not available; using ResNet50 fallback.")
+            warnings.warn("DINOv3 not available; using ResNet50 fallback.")
             model, info = _build_resnet50_fallback()
-            self.is_dinov2 = False
+            self.is_dinov3 = False
         else:
             model, info = built
-            self.is_dinov2 = True
+            self.is_dinov3 = True
 
         self.model = model
         self.info = info
@@ -89,7 +89,7 @@ class FrameEncoder(nn.Module):
             p.requires_grad = False
 
         # LayerNorm tuning for ViT-style models
-        if self.is_dinov2 and layernorm_tuning:
+        if self.is_dinov3 and layernorm_tuning:
             for m in self.model.modules():
                 if isinstance(m, nn.LayerNorm):
                     for p in m.parameters():

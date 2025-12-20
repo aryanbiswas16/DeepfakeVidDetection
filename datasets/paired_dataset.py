@@ -1,41 +1,57 @@
 import os
-from torch.utils.data import Dataset
 from PIL import Image
+import torch
+from torch.utils.data import Dataset
 
 class PairedDataset(Dataset):
-    """Dataset that returns paired real/fake images originating from same source.
-
-    Expects two directories: real_dir and fake_dir. Filenames should share a common
-    basename so we can pair them (e.g. "video001_frame000.jpg" present in both).
-    Returns: (real_img, fake_img, basename)
     """
+    Load paired real/fake frames.
+    
+    Directory structure:
+        data/train/real/video_001_frame_0000.jpg
+        data/train/fake/video_001_frame_0000.jpg  (same filename!)
+    """
+    
     def __init__(self, real_dir, fake_dir, transform=None):
+        super().__init__()
+        
+        self.transform = transform
+        
+        # Get all files from real directory
+        self.real_files = sorted([f for f in os.listdir(real_dir) 
+                                  if f.endswith(('.jpg', '.png'))])
         self.real_dir = real_dir
         self.fake_dir = fake_dir
-        self.transform = transform
-
-        real_files = [f for f in os.listdir(real_dir) if f.lower().endswith(('.jpg','.png','.jpeg'))]
-        fake_files = set([f for f in os.listdir(fake_dir) if f.lower().endswith(('.jpg','.png','.jpeg'))])
-
-        # Keep only pairs that exist in both
-        self.pairs = []
-        for f in real_files:
-            if f in fake_files:
-                self.pairs.append(f)
-
-        if len(self.pairs) == 0:
-            raise RuntimeError(f"No paired files found between {real_dir} and {fake_dir}")
-
+        
+        # Verify all real files have corresponding fake files
+        missing = []
+        for fname in self.real_files:
+            if not os.path.exists(os.path.join(fake_dir, fname)):
+                missing.append(fname)
+        
+        if missing:
+            print(f"Warning: {len(missing)} real files have no fake counterpart")
+            self.real_files = [f for f in self.real_files if f not in missing]
+        
+        print(f"Loaded {len(self.real_files)} paired real/fake frames")
+    
     def __len__(self):
-        return len(self.pairs)
-
+        return len(self.real_files)
+    
     def __getitem__(self, idx):
-        fname = self.pairs[idx]
+        fname = self.real_files[idx]
+        
+        # Load real frame
         real_path = os.path.join(self.real_dir, fname)
-        fake_path = os.path.join(self.fake_dir, fname)
         real_img = Image.open(real_path).convert('RGB')
+        
+        # Load fake frame (same filename)
+        fake_path = os.path.join(self.fake_dir, fname)
         fake_img = Image.open(fake_path).convert('RGB')
+        
+        # Apply preprocessing
         if self.transform:
             real_img = self.transform(real_img)
             fake_img = self.transform(fake_img)
+        
         return real_img, fake_img, fname

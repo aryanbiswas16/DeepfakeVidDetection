@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 from torchvision import transforms
 
-# Minimal preprocess function; tuned later if DINOv2 provides a specific pipeline
+# Minimal preprocess function; tuned later if DINOv3 provides a specific pipeline
 def build_preprocess(image_size: int = 224):
     return transforms.Compose(
         [

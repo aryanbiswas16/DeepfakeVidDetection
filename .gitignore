@@ -20,6 +20,8 @@ Thumbs.db
 # Local training data (keep data/README.txt tracked)
 data/train/
 data/val/
+data/processed_ff/
+data/processed_celeb/
 
 # Model weights / artifacts (adjust if you want to publish weights)
 *.pt

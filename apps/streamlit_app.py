@@ -2,6 +2,12 @@ import streamlit as st
 import torch
 import tempfile
 import os
+import sys
+
+# Add project root to path
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_ROOT)
+
 from PIL import Image
 from models.detector import Detector
 from utils.video_io import read_video_frames
@@ -10,7 +16,7 @@ from utils.weights import load_weights
 from utils.identity import IdentityMatcher
 
 st.set_page_config(page_title="Deepfake Inspector v3", layout="wide")
-st.title("🕵️ DINOv2 AI Video Inspector (v3)")
+st.title("🕵️ DINOv3 AI Video Inspector (v3)")
 st.sidebar.header("Settings")
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -19,8 +25,9 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 def load_detector():
     det = Detector(device=device)
     # Try load default weights
-    weight_path = "training/weights/dinov2_best.pth"
-    loaded = load_weights(det.head, weight_path) or load_weights(det, weight_path)
+    weight_path = os.path.join(PROJECT_ROOT, "training", "weights", "dinov2_best.pth")
+    # Only load into the full detector object, as the weights file contains {'head': ..., 'encoder': ...}
+    loaded = load_weights(det, weight_path)
     return det, loaded
 
 detector, weights_loaded = load_detector()
