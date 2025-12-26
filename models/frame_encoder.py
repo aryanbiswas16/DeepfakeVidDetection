@@ -42,12 +42,12 @@ def _try_build_dinov3() -> tuple[nn.Module, EncoderInfo] | None:
                 # fallback guess
                 embed_dim = 1024
             info = EncoderInfo(name=f"timm:{name}", embed_dim=int(embed_dim), image_size=224)
-            print(f"✅ Successfully loaded encoder: {name}")
+            print(f"Loaded encoder: {name}")
             return model, info
         except Exception:
             continue
             
-    print("❌ Failed to load any DINO model from candidates.")
+    print("Failed to load any DINO model from candidates.")
     return None
 
 def _build_resnet50_fallback() -> tuple[nn.Module, EncoderInfo]:

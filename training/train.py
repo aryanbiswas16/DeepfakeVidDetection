@@ -12,14 +12,14 @@ from datasets.paired_dataset import PairedDataset
 from datasets.faceforensics import FaceForensicsDataset
 from datasets.celeb_df import CelebDFDataset
 from models.detector import Detector
-from utils.preprocess import build_preprocess
+from utils.preprocess import build_preprocess, build_training_preprocess
 
 
-def metric_loss(embeddings, labels, margin=0.3):
-    # embeddings: [B, D]
-    # labels: [B]
-    # compute cosine similarity matrix
-    cos_sim = torch.nn.functional.cosine_similarity(embeddings.unsqueeze(1), embeddings.unsqueeze(0), dim=2)
+def metric_loss(embeddings, labels, margin=0.6):
+    """Metric loss with improved margin."""
+    cos_sim = torch.nn.functional.cosine_similarity(
+        embeddings.unsqueeze(1), embeddings.unsqueeze(0), dim=2
+    )
     targets = (labels.unsqueeze(0) != labels.unsqueeze(1)).float()
     loss = (targets * torch.nn.functional.relu(cos_sim + margin)).mean()
     return loss
@@ -29,16 +29,21 @@ def train():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
-    preprocess = build_preprocess(image_size=224)
+    # Use robust augmentation for training
+    train_preprocess = build_training_preprocess(image_size=224)
+    # Use standard preprocess for validation
+    val_preprocess = build_preprocess(image_size=224)
 
-    # Batch size guidance: 12GB GPU -> start with 4–8 when backbone is frozen/LayerNorm-tuned.
-    # Can lower further if you hit OOM, or increase on larger GPUs.
-    batch_size = int(os.environ.get("BATCH_SIZE", "4"))
+
+    batch_size = int(os.environ.get("BATCH_SIZE", "16"))
     val_batch_size = int(os.environ.get("VAL_BATCH_SIZE", str(max(2, batch_size * 2))))
 
-    # --- DATASET CONFIGURATION ---
-    # Training: FaceForensics++
-    # Validation: Celeb-DF v2
+    # On Windows, DataLoader multiprocessing can spawn with an unexpected interpreter
+    # if the environment isn't activated consistently. Defaulting to 0 keeps it robust.
+    default_num_workers = "0" if os.name == "nt" else "4"
+    num_workers = int(os.environ.get("NUM_WORKERS", default_num_workers))
+
+
     
     train_datasets = []
     val_datasets = []
@@ -52,12 +57,12 @@ def train():
         if os.path.exists(manipulated_path):
             for method in os.listdir(manipulated_path):
                 print(f"Adding FF++ method: {method}")
-                ds = FaceForensicsDataset(ff_root, method=method, split="all", transform=preprocess)
+                ds = FaceForensicsDataset(ff_root, method=method, split="all", transform=train_preprocess)
                 if len(ds) > 0:
                     train_datasets.append(ds)
         else:
             # Fallback if structure isn't fully there yet or just Deepfakes
-            ds = FaceForensicsDataset(ff_root, method="Deepfakes", split="all", transform=preprocess)
+            ds = FaceForensicsDataset(ff_root, method="Deepfakes", split="all", transform=train_preprocess)
             if len(ds) > 0: train_datasets.append(ds)
     else:
         print(f"Warning: FF++ root not found at {ff_root}")
@@ -66,12 +71,17 @@ def train():
     celeb_root = "data/processed_celeb"
     if os.path.exists(celeb_root):
         print(f"Loading Celeb-DF from {celeb_root}...")
-        # Use ALL Celeb-DF for validation
-        ds_c_train = CelebDFDataset(celeb_root, split="train", transform=preprocess)
-        ds_c_val = CelebDFDataset(celeb_root, split="val", transform=preprocess)
-        
-        if len(ds_c_train) > 0: val_datasets.append(ds_c_train)
-        if len(ds_c_val) > 0: val_datasets.append(ds_c_val)
+        # Use ONLY Celeb-DF test split for true generalization evaluation
+        # If 'test' folder doesn't exist/is empty, fallback to 'val'
+        ds_c_test = CelebDFDataset(celeb_root, split="test", transform=val_preprocess)
+        if len(ds_c_test) > 0:
+            val_datasets.append(ds_c_test)
+            print("Using Celeb-DF 'test' split for validation.")
+        else:
+            ds_c_val = CelebDFDataset(celeb_root, split="val", transform=val_preprocess)
+            if len(ds_c_val) > 0:
+                val_datasets.append(ds_c_val)
+                print("Using Celeb-DF 'val' split for validation (test split empty/missing).")
     else:
         print(f"Warning: Celeb-DF root not found at {celeb_root}")
 
@@ -80,26 +90,46 @@ def train():
         return
 
     dataset = ConcatDataset(train_datasets)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True,
+    )
     print(f"Training on {len(dataset)} frames (FF++)")
 
     val_loader = None
     if val_datasets:
         val_dataset = ConcatDataset(val_datasets)
-        val_loader = DataLoader(val_dataset, batch_size=val_batch_size, shuffle=False)
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=val_batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+        )
         print(f"Validation enabled: {len(val_dataset)} frames (Celeb-DF)")
     else:
         print("Validation disabled (no validation data found)")
 
     detector = Detector(device=device)
-    # Only train head + any LayerNorm params that were left unfrozen in encoder
-    params = [p for p in detector.head.parameters() if p.requires_grad]
-    # Also include encoder params that require grad (LayerNorm tuning)
-    params += [p for p in detector.encoder.model.parameters() if p.requires_grad]
+    
+    # Unfreeze the last block of the encoder for better fine-tuning
+    
+    if hasattr(detector.encoder.model, 'blocks'):
+        last_block = detector.encoder.model.blocks[-1]
+        for p in last_block.parameters():
+            p.requires_grad = True
+    
+    # Collect all trainable parameters
+    params = [p for p in detector.parameters() if p.requires_grad]
 
-    optimizer = optim.Adam(params, lr=1e-4)
+    optimizer = optim.AdamW(params, lr=1e-4, weight_decay=1e-4)
+    
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=20) 
     criterion = nn.CrossEntropyLoss()
-    scaler = torch.amp.GradScaler('cuda')
+    scaler = torch.amp.GradScaler('cuda', enabled=(device == 'cuda'))
 
     print("Starting paired training loop...")
     detector.head.train()
@@ -140,26 +170,31 @@ def train():
 
             auroc = float(roc_auc_score(all_labels, all_probs))
         except Exception as e:
-            print(f"AUROC unavailable (install scikit-learn to enable): {e}")
+            print(f"AUROC unavailable: {e}")
 
         return acc, auroc
 
 
     best_val_auroc = float("-inf")
-    for epoch in range(5):
+    epochs = 20
+    for epoch in range(epochs):
         total_loss = 0.0
-        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/5")
+        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}")
+        
         for real_imgs, fake_imgs, _ in progress_bar:
-            # real_imgs, fake_imgs: (B, C, H, W) tensors already preprocessed
             imgs = torch.cat([real_imgs, fake_imgs], dim=0).to(device)
-            labels = torch.cat([torch.zeros(real_imgs.size(0)), torch.ones(fake_imgs.size(0))], dim=0).long().to(device)
+            labels = torch.cat(
+                [torch.zeros(real_imgs.size(0)), torch.ones(fake_imgs.size(0))],
+                dim=0
+            ).long().to(device)
 
             optimizer.zero_grad()
+            
             with torch.amp.autocast('cuda'):
                 logits, embeddings = detector.forward(imgs)
                 ce = criterion(logits, labels)
-                ml = metric_loss(embeddings, labels)
-                loss = ce + 0.5 * ml
+                ml = metric_loss(embeddings, labels, margin=0.6) 
+                loss = ce + 0.5 * ml   
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -167,8 +202,9 @@ def train():
 
             total_loss += loss.item()
             progress_bar.set_postfix(loss=loss.item())
-
-        print(f"Epoch {epoch+1}, Loss: {total_loss/len(dataloader):.4f}")
+        
+        scheduler.step()
+        print(f"Epoch {epoch+1}, Loss: {total_loss/len(dataloader):.4f}, LR: {scheduler.get_last_lr()[0]:.6f}")
 
         if val_loader is not None:
             val_acc, val_auroc = _evaluate(detector, val_loader)
@@ -187,17 +223,17 @@ def train():
 
         if should_save:
             os.makedirs("training/weights", exist_ok=True)
-            save_path = "training/weights/dinov3_best.pth"
+            save_path = "training/weights/dinov3_best_v4.pth"
             
             state = {
                 "head": detector.head.state_dict(),
             }
             
-            # Save only trainable LayerNorm params from encoder
+            # Save ALL trainable params from encoder (LayerNorms + Unfrozen Blocks)
             encoder_state = {}
             try:
                 for k, v in detector.encoder.model.named_parameters():
-                    if ('norm' in k.lower() or 'ln' in k.lower()) and v.requires_grad:
+                    if v.requires_grad:
                         encoder_state[k] = v.detach().cpu()
             except Exception as e:
                 print(f"Warning: Could not extract encoder state: {e}")

@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 import torch
 import torch.nn as nn
 
-from models.classifier_head import ClassifierHead
+from models.classifier_head import LinearProbe
 from models.frame_encoder import FrameEncoder
 from utils.preprocess import build_preprocess
 
@@ -31,7 +31,12 @@ class Detector(nn.Module):
         self.device = device
 
         self.encoder = FrameEncoder(device=device, layernorm_tuning=True)
-        self.head = ClassifierHead(in_dim=self.encoder.embed_dim)
+        self.head = LinearProbe(
+            input_dim=self.encoder.embed_dim,
+            num_classes=2,
+            normalize_inputs=True,
+            detach_classifier_inputs=False
+        )
 
         # Exposed for smoke_test / apps
         self.preprocess = build_preprocess(image_size=self.encoder.image_size)
@@ -39,9 +44,9 @@ class Detector(nn.Module):
         self.to(device)
 
     def forward(self, images: torch.Tensor):
-        embeddings = self.encoder(images)
-        logits = self.head(embeddings)
-        return logits, embeddings
+        x = self.encoder(images)
+        head_output = self.head(x)
+        return head_output.logits_labels, head_output.l2_embeddings
 
     @torch.no_grad()
     def predict_video(self, frames: torch.Tensor) -> Dict[str, Any]:
